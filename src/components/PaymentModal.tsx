@@ -29,7 +29,7 @@ interface PaymentModalProps {
 
 const STORE_CARD_NUMBER = '9860170122051080';
 const STORE_CARD_FORMATTED = '9860 1701 2205 1080';
-const STORE_CARD_HOLDER = 'FLANER COSMETICS';
+const STORE_CARD_HOLDER = 'Sherzod T';
 
 export const PaymentModal: React.FC<PaymentModalProps> = ({
   order,
@@ -86,33 +86,19 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setTimeout(() => setCopiedAmount(false), 2500);
   };
 
-  const handleProcessPayment = (details?: { senderInfo?: string } | React.MouseEvent) => {
+  // A browser action is never proof of payment. Only a signed provider webhook may
+  // later mark an order as paid on the server.
+  const handleProcessPayment = (_details?: { senderInfo?: string } | React.MouseEvent) => {
     triggerHaptic('medium');
     setStep('processing');
 
-    const senderInfo = details && 'senderInfo' in details ? details.senderInfo : undefined;
-
-    // Notify backend via Telegram API in background
-    fetch('/api/telegram/send-status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        orderNumber: order.orderNumber,
-        customerChatId: order.customer.telegramId,
-        statusText: `Оплачено онлайн на карту 9860 1701 2205 1080 (Humo). ${
-          senderInfo ? `Данные отправителя: ${senderInfo}` : ''
-        }`
-      })
-    }).catch(() => {
-      // Ignore background notification errors
-    });
-
     setTimeout(() => {
-      triggerHaptic('success');
       const updatedOrder: Order = {
         ...order,
-        paymentStatus: 'paid',
-        status: 'paid'
+        // Never trust a browser to confirm a payment. A real provider webhook must
+        // update this on the server after signature verification.
+        paymentStatus: 'pending',
+        status: 'new'
       };
       setStep('success');
       onSuccess(updatedOrder);
@@ -374,7 +360,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     <input
                       type="text"
                       placeholder="Например: 9860 **** 4321 или Фамилия Имя"
-                      value={senderCardInfo}
+                        value={senderCardInfo}
+                        disabled
                       onChange={(e) => setSenderCardInfo(e.target.value)}
                       className="w-full px-3 py-2 text-xs bg-[#FAF8F5] border border-[#DFD6CD] rounded-xl text-[#2A2421] focus:outline-none focus:border-[#2A2421]"
                     />
@@ -481,6 +468,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                           <input
                             type="text"
                             value={paymeCard}
+                            disabled
                             onChange={(e) => setPaymeCard(e.target.value)}
                             placeholder="8600 0000 0000 0000"
                             className="w-full pl-9 pr-3 py-2 text-xs bg-[#FAF8F5] border border-[#DFD6CD] rounded-xl font-mono text-[#2A2421]"
@@ -496,6 +484,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                           <input
                             type="text"
                             value={paymeExpiry}
+                            disabled
                             onChange={(e) => setPaymeExpiry(e.target.value)}
                             placeholder="ММ/ГГ"
                             className="w-full px-3 py-2 text-xs bg-[#FAF8F5] border border-[#DFD6CD] rounded-xl font-mono text-[#2A2421]"
@@ -534,6 +523,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         type="text"
                         placeholder="Код подтверждения (например 123456)"
                         value={paymeOtp}
+                        disabled
                         onChange={(e) => setPaymeOtp(e.target.value)}
                         className="w-full px-3 py-2 text-sm text-center tracking-widest bg-white border border-[#DFD6CD] rounded-xl font-mono"
                         maxLength={6}
@@ -603,7 +593,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       </label>
                       <input
                         type="text"
-                        value={stripeCard}
+                      value={stripeCard}
+                      disabled
                         onChange={(e) => setStripeCard(e.target.value)}
                         className="w-full px-3 py-2 text-xs bg-[#FAF8F5] border border-[#DFD6CD] rounded-xl font-mono text-[#2A2421]"
                       />
@@ -615,7 +606,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         </label>
                         <input
                           type="text"
-                          value={stripeExp}
+                        value={stripeExp}
+                        disabled
                           onChange={(e) => setStripeExp(e.target.value)}
                           className="w-full px-3 py-2 text-xs bg-[#FAF8F5] border border-[#DFD6CD] rounded-xl font-mono text-[#2A2421]"
                         />
@@ -626,7 +618,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         </label>
                         <input
                           type="password"
-                          value={stripeCvc}
+                        value={stripeCvc}
+                        disabled
                           onChange={(e) => setStripeCvc(e.target.value)}
                           maxLength={4}
                           className="w-full px-3 py-2 text-xs bg-[#FAF8F5] border border-[#DFD6CD] rounded-xl font-mono text-[#2A2421]"

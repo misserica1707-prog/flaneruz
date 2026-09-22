@@ -6,7 +6,7 @@ import { ProductCard } from './components/ProductCard';
 import { ProductDetailModal } from './components/ProductDetailModal';
 import { CartDrawer } from './components/CartDrawer';
 import { CheckoutModal } from './components/CheckoutModal';
-import { AdminPanel } from './components/AdminPanel';
+import { AdminAccess } from './components/AdminAccess';
 import { TelegramFrame } from './components/TelegramFrame';
 import { ShareModal } from './components/ShareModal';
 import { formatPrice } from './utils/formatters';
@@ -40,7 +40,7 @@ const ShopContent: React.FC = () => {
   } = useShop();
 
   if (isAdminOpen) {
-    return <AdminPanel />;
+    return <AdminAccess />;
   }
 
   // Filter products

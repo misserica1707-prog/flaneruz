@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 
@@ -8,22 +9,67 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(express.json({ limit: '100kb' }));
 
-// Enable CORS and mobile headers so requests from any phone or domain succeed
+// This API is intended to be used from the same origin as the shop.
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('X-Content-Type-Options', 'nosniff');
+  res.header('X-Frame-Options', 'SAMEORIGIN');
+  res.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
   next();
 });
 
-// Telegram Bot Token - flaner_cosmetics bot
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8580114168:AAEQuUmq5pVHd0B50syGwJ1pS5BGh4XXgVc';
+// Never put production secrets in source code. Set them in the deployment environment.
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 let configuredAdminChatId = process.env.TELEGRAM_ADMIN_CHAT_ID || '';
+const ADMIN_ACCESS_CODE = process.env.ADMIN_ACCESS_CODE || '';
+const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || '';
+const ADMIN_EMAIL_ALLOWLIST = new Set(
+  (process.env.ADMIN_EMAIL_ALLOWLIST || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean)
+);
+const SESSION_COOKIE = 'flaner_admin_session';
+const SESSION_TTL_SECONDS = 60 * 60 * 8;
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
+function getCookie(req: express.Request, name: string): string | undefined {
+  const entry = (req.headers.cookie || '').split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
+  return entry ? decodeURIComponent(entry.slice(name.length + 1)) : undefined;
+}
+
+function signSession(email: string, expiresAt: number): string {
+  const payload = Buffer.from(JSON.stringify({ email, expiresAt })).toString('base64url');
+  const signature = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function verifySession(token?: string): { email: string } | null {
+  if (!token || !ADMIN_SESSION_SECRET) return null;
+  const [payload, signature] = token.split('.');
+  if (!payload || !signature) return null;
+  const expected = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(payload).digest('base64url');
+  if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString()) as { email?: string; expiresAt?: number };
+    if (!data.email || !data.expiresAt || data.expiresAt < Date.now() || !ADMIN_EMAIL_ALLOWLIST.has(data.email)) return null;
+    return { email: data.email };
+  } catch { return null; }
+}
+
+function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const session = verifySession(getCookie(req, SESSION_COOKIE));
+  if (!session) return res.status(401).json({ error: 'Administrator authentication required' });
+  res.locals.admin = session;
+  next();
+}
+
+function setSessionCookie(res: express.Response, token: string, maxAge = SESSION_TTL_SECONDS) {
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
+}
 
 // In-memory log of telegram notifications
 interface TelegramLogEntry {
@@ -70,8 +116,36 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', name: 'flaner_cosmetics' });
 });
 
+app.get('/api/admin/session', (req, res) => {
+  const session = verifySession(getCookie(req, SESSION_COOKIE));
+  res.json({ authenticated: !!session, email: session?.email });
+});
+
+app.post('/api/admin/login', (req, res) => {
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  const attempt = loginAttempts.get(ip);
+  if (attempt && attempt.resetAt > now && attempt.count >= 5) return res.status(429).json({ error: 'Too many attempts. Try again in 15 minutes.' });
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const code = typeof req.body?.code === 'string' ? req.body.code : '';
+  const configured = Boolean(ADMIN_ACCESS_CODE && ADMIN_SESSION_SECRET && ADMIN_EMAIL_ALLOWLIST.size);
+  const matchesCode = configured && code.length === ADMIN_ACCESS_CODE.length && crypto.timingSafeEqual(Buffer.from(code), Buffer.from(ADMIN_ACCESS_CODE));
+  if (!configured || !ADMIN_EMAIL_ALLOWLIST.has(email) || !matchesCode) {
+    loginAttempts.set(ip, { count: attempt && attempt.resetAt > now ? attempt.count + 1 : 1, resetAt: now + 15 * 60 * 1000 });
+    return res.status(401).json({ error: 'Invalid email or access code' });
+  }
+  loginAttempts.delete(ip);
+  setSessionCookie(res, signSession(email, now + SESSION_TTL_SECONDS * 1000));
+  res.json({ authenticated: true, email });
+});
+
+app.post('/api/admin/logout', requireAdmin, (req, res) => {
+  setSessionCookie(res, '', 0);
+  res.json({ success: true });
+});
+
 // Check Telegram Bot connection status and get bot profile
-app.get('/api/telegram/status', async (req, res) => {
+app.get('/api/telegram/status', requireAdmin, async (req, res) => {
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`;
     const response = await fetch(url);
@@ -102,7 +176,7 @@ app.get('/api/telegram/status', async (req, res) => {
 });
 
 // Get recent updates (helps admin discover their Chat ID after messaging the bot)
-app.get('/api/telegram/updates', async (req, res) => {
+app.get('/api/telegram/updates', requireAdmin, async (req, res) => {
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?limit=10`;
     const response = await fetch(url);
@@ -130,11 +204,11 @@ app.get('/api/telegram/updates', async (req, res) => {
 });
 
 // Get / Set Admin Chat ID
-app.get('/api/telegram/admin-chat', (req, res) => {
+app.get('/api/telegram/admin-chat', requireAdmin, (req, res) => {
   res.json({ success: true, adminChatId: configuredAdminChatId });
 });
 
-app.post('/api/telegram/admin-chat', (req, res) => {
+app.post('/api/telegram/admin-chat', requireAdmin, (req, res) => {
   const targetId = req.body.adminChatId !== undefined ? req.body.adminChatId : req.body.chatId;
   if (typeof targetId === 'string' || typeof targetId === 'number') {
     configuredAdminChatId = String(targetId).trim();
@@ -248,7 +322,7 @@ app.post('/api/telegram/send-order', async (req, res) => {
 });
 
 // Send order status update notification to customer / admin
-app.post('/api/telegram/send-status-update', async (req, res) => {
+app.post('/api/telegram/send-status-update', requireAdmin, async (req, res) => {
   try {
     const { orderNumber, customerName, newStatus, chatId, phone } = req.body;
     const targetChat = chatId || configuredAdminChatId;
@@ -286,7 +360,7 @@ app.post('/api/telegram/send-status-update', async (req, res) => {
 });
 
 // Test message sender
-app.post('/api/telegram/test-message', async (req, res) => {
+app.post('/api/telegram/test-message', requireAdmin, async (req, res) => {
   try {
     const { chatId, message } = req.body;
     const target = chatId || configuredAdminChatId;
@@ -321,7 +395,7 @@ app.post('/api/telegram/test-message', async (req, res) => {
 });
 
 // Get telegram notification logs
-app.get('/api/telegram/logs', (req, res) => {
+app.get('/api/telegram/logs', requireAdmin, (req, res) => {
   res.json({ logs: telegramLogs.slice(0, 20) });
 });
 
@@ -344,7 +418,7 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`flaner_cosmetics server running on http://localhost:${PORT}`);
-    console.log(`Telegram Bot @flaneruz_bot active (Token: ${TELEGRAM_BOT_TOKEN.slice(0, 10)}...)`);
+    console.log(`Telegram Bot integration ${TELEGRAM_BOT_TOKEN ? 'configured' : 'not configured'}`);
   });
 }
 
