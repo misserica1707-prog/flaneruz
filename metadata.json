@@ -1,0 +1,6 @@
+{
+  "name": "flaner_cosmetics",
+  "description": "flaner_cosmetics — онлайн-бутик селективной косметики и парфюмерии в Telegram (бот @flaneruz_bot) с корзиной, приемом платежей и интеграцией Telegram Bot API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
