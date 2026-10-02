@@ -64,8 +64,34 @@ npm test        # unit tests (cart, phone, lead request contract, initData handl
 npm run build   # static files in dist/
 ```
 
-## Deploy
+## Production
 
-Publish `dist/` on any static host (for example a Render Static Site: build `npm ci && npm run build`, publish
-directory `dist`, env `VITE_API_BASE_URL`). Then, in BotFather, set the Mini App / menu button URL to the site's
-HTTPS address, and add that origin to `CORS_ORIGINS` on the Flaner backend.
+Production URL (the Mini App origin): **https://flaneruz.onrender.com** (HTTPS is provided by Render). This is the URL
+`@flaneruz_bot` opens (BotFather menu button), and it is the value the backend needs in `CORS_ORIGINS`.
+
+It runs as a Render Web Service built from this repository:
+
+| Setting | Value |
+|---|---|
+| Build Command | `npm install && npm run build` (or `npm ci && npm run build`) |
+| Start Command | `npm start` (serves `dist/` with `vite preview` on `$PORT`) |
+| Branch | `main` |
+| Env | none required. `VITE_API_BASE_URL` defaults to `https://flaner.onrender.com` from `.env.production`; a value in the dashboard overrides it. |
+
+The build fails on purpose when the backend URL is missing, is not https (http is allowed for localhost only) or has a path.
+The old secrets of the previous Express version (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `ADMIN_*`, `GEMINI_API_KEY`,
+`APP_URL`) are not used any more and should be removed from this service.
+
+### Release order (matters)
+
+1. **Backend first.** On the Flaner backend service add `https://flaneruz.onrender.com` to `CORS_ORIGINS` (keep existing
+   values, comma separated, no trailing slash) and confirm `TELEGRAM_BOT_TOKEN` is the token of `@flaneruz_bot`. Wait for the
+   restart. Until this is done the new Mini App cannot read the catalog (the browser blocks it).
+2. **Then the Mini App.** Merge to `main`; Render builds and deploys. Open the site and check that the catalog loads.
+3. **Smoke test in Telegram.** Send one lead from the real bot and check in the admin panel that it has source *Telegram*.
+4. **Cleanup.** Remove the unused secrets from this service (see above).
+
+Rollback: Render dashboard, this service, *Events/Deploys*: redeploy the previous successful deploy.
+
+A Render **Static Site** (free, never sleeps) would also work for this app (build `npm ci && npm run build`, publish `dist`,
+rewrite `/*` to `/index.html`); the origin and the CORS value would then be that site's URL.
