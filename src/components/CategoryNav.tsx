@@ -1,7 +1,7 @@
 import React from 'react';
 import { useShop } from '../context/ShopContext';
 import { CategoryId } from '../types';
-import { POPULAR_BRANDS } from '../data/initialProducts';
+import { POPULAR_BRANDS } from '../data/brands';
 import { Sparkles, Smile, Palette, Flame, Award, Search, X, ArrowUpDown } from 'lucide-react';
 import { triggerHaptic } from '../utils/telegram';
 

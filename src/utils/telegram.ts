@@ -1,4 +1,4 @@
-import { TelegramWebAppUser } from '../types';
+import type { TelegramWebAppUser } from '../types';
 
 declare global {
   interface Window {
@@ -78,6 +78,16 @@ declare global {
 
 export function isInsideTelegram(): boolean {
   return typeof window !== 'undefined' && !!window.Telegram?.WebApp?.initData;
+}
+
+/**
+ * The raw, signed initData string, read at call time. It is empty outside Telegram. The shop backend is the only
+ * place that may trust it (after verifying the signature); the client just forwards it untouched.
+ */
+export function getTelegramInitData(): string {
+  if (typeof window === 'undefined') return '';
+  const raw = window.Telegram?.WebApp?.initData;
+  return typeof raw === 'string' ? raw : '';
 }
 
 export function getTelegramUser(): TelegramWebAppUser | null {

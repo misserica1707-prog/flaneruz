@@ -1,21 +1,36 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Product, CartItem, Order, OrderStatus, CategoryId, Currency, TelegramWebAppUser } from '../types';
-import { INITIAL_PRODUCTS } from '../data/initialProducts';
-import { getTelegramUser, initTelegramApp, triggerHaptic } from '../utils/telegram';
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef } from 'react';
+import { Product, CartItem, CategoryId, Currency, TelegramWebAppUser } from '../types';
+import { getTelegramInitData, getTelegramUser, initTelegramApp, triggerHaptic } from '../utils/telegram';
+import { API_BASE_URL, apiUrl } from '../utils/api';
+import {
+  CartLine,
+  MAX_ITEMS_PER_LEAD,
+  MAX_QUANTITY_PER_ITEM,
+  cartSignature,
+  parseStoredCart,
+  parseStoredFavorites,
+  upsertLine
+} from '../utils/cartStorage';
+import { LeadFormValues, LeadReceipt, LeadSubmitError, createIdempotencyKey, postLead } from '../utils/leadApi';
+import { normalizeUzPhone } from '../utils/phone';
 
 interface ShopContextType {
   products: Product[];
+  /** True once the first catalog request finished, successfully or not. */
+  catalogStatus: 'loading' | 'ready' | 'error';
+  /** Cart lines joined with the live catalog (names, images and prices are never stored). */
   cart: CartItem[];
+  favorites: Product[];
+  favoriteIds: string[];
   selectedCategory: CategoryId | 'all';
   selectedBrand: string | 'all';
   searchQuery: string;
   sortBy: 'popular' | 'price-asc' | 'price-desc' | 'rating';
   currency: Currency;
-  orders: Order[];
   selectedProductForDetail: Product | null;
   isCartOpen: boolean;
-  isCheckoutOpen: boolean;
-  isAdminOpen: boolean;
+  isLeadFormOpen: boolean;
+  isFavoritesOpen: boolean;
   isTelegramFrame: boolean;
   isShareOpen: boolean;
   telegramUser: TelegramWebAppUser | null;
@@ -28,10 +43,11 @@ interface ShopContextType {
   setSortBy: (sort: 'popular' | 'price-asc' | 'price-desc' | 'rating') => void;
   setCurrency: (curr: Currency) => void;
   setIsCartOpen: (open: boolean) => void;
-  setIsCheckoutOpen: (open: boolean) => void;
-  setIsAdminOpen: (open: boolean) => void;
+  setIsLeadFormOpen: (open: boolean) => void;
+  setIsFavoritesOpen: (open: boolean) => void;
   setIsTelegramFrame: (frame: boolean) => void;
   setIsShareOpen: (open: boolean) => void;
+  reloadCatalog: () => Promise<void>;
 
   openProductDetail: (product: Product) => void;
   closeProductDetail: () => void;
@@ -41,121 +57,33 @@ interface ShopContextType {
   updateQuantity: (productId: string, quantity: number) => void;
   clearCart: () => void;
 
-  createOrder: (order: Order) => void;
-  updateOrderStatus: (orderId: string, status: OrderStatus) => void;
-
-  addProduct: (product: Omit<Product, 'id'>) => void;
-  updateProduct: (id: string, product: Partial<Product>) => void;
-  deleteProduct: (id: string) => void;
-  toggleProductStock: (id: string) => void;
+  toggleFavorite: (productId: string) => void;
+  /** Sends the cart as a lead. Clears the cart only after the server accepted it; throws LeadSubmitError otherwise. */
+  submitLead: (values: LeadFormValues) => Promise<LeadReceipt>;
   showToast: (message: string, type?: 'success' | 'info' | 'error') => void;
-  resetDemoData: () => void;
 }
 
 const ShopContext = createContext<ShopContextType | undefined>(undefined);
 
-const SEED_ORDERS: Order[] = [
-  {
-    id: 'ord-101',
-    orderNumber: 'FL-4819',
-    createdAt: new Date(Date.now() - 1000 * 60 * 45).toISOString(), // 45 min ago
-    customer: {
-      fullName: 'Дильноза Каримова',
-      phone: '+998 90 123 45 67',
-      telegramUsername: '@dilnoza_beauty',
-      address: 'Узбекистан, г. Ташкент',
-      city: 'Ташкент',
-      deliveryType: 'courier',
-      comment: 'Домофон работает, позвоните за 15 минут'
-    },
-    items: [
-      {
-        productId: 'prod-1',
-        productName: 'Advanced Night Repair Serum',
-        brand: 'Estée Lauder',
-        image: 'https://images.unsplash.com/photo-1620916566398-39f1143ab7be?auto=format&fit=crop&w=800&q=80',
-        price: 980000,
-        volume: '50 мл',
-        quantity: 1
-      },
-      {
-        productId: 'prod-5',
-        productName: 'Dior Addict Lip Glow Balm',
-        brand: 'Dior',
-        image: 'https://images.unsplash.com/photo-1586495777744-4413f21062fa?auto=format&fit=crop&w=800&q=80',
-        price: 520000,
-        volume: '3.2 г',
-        quantity: 1
-      }
-    ],
-    subtotal: 1500000,
-    discount: 150000,
-    deliveryFee: 0,
-    total: 1350000,
-    paymentMethod: 'card_online',
-    paymentStatus: 'paid',
-    status: 'processing',
-    promoCode: 'BEAUTY10'
-  },
-  {
-    id: 'ord-102',
-    orderNumber: 'FL-3912',
-    createdAt: new Date(Date.now() - 1000 * 60 * 180).toISOString(), // 3 hours ago
-    customer: {
-      fullName: 'Малика Усманова',
-      phone: '+998 93 987 65 43',
-      telegramUsername: '@malika_u',
-      address: 'Узбекистан, г. Ташкент',
-      city: 'Ташкент',
-      deliveryType: 'express'
-    },
-    items: [
-      {
-        productId: 'prod-9',
-        productName: 'Lost Cherry Eau de Parfum',
-        brand: 'Tom Ford',
-        image: 'https://images.unsplash.com/photo-1594035910387-fea47794261f?auto=format&fit=crop&w=800&q=80',
-        price: 3450000,
-        volume: '50 мл',
-        quantity: 1
-      }
-    ],
-    subtotal: 3450000,
-    discount: 0,
-    deliveryFee: 30000,
-    total: 3480000,
-    paymentMethod: 'click',
-    paymentStatus: 'paid',
-    status: 'shipped'
-  }
-];
-
 export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Local storage initialization
-  const [products, setProducts] = useState<Product[]>(() => {
-    try {
-      const saved = localStorage.getItem('flaner_products') || localStorage.getItem('lumiere_products');
-      return saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
-    } catch {
-      return INITIAL_PRODUCTS;
-    }
-  });
+  const [products, setProducts] = useState<Product[]>([]);
+  const [catalogStatus, setCatalogStatus] = useState<'loading' | 'ready' | 'error'>('loading');
 
-  const [cart, setCart] = useState<CartItem[]>(() => {
+  // The cart is stored as { productId, quantity } only. Names, images and prices come from the live catalog.
+  const [cartLines, setCartLines] = useState<CartLine[]>(() => {
     try {
-      const saved = localStorage.getItem('flaner_cart') || localStorage.getItem('lumiere_cart');
-      return saved ? JSON.parse(saved) : [];
+      return parseStoredCart(localStorage.getItem('flaner_cart') || localStorage.getItem('lumiere_cart'));
     } catch {
       return [];
     }
   });
 
-  const [orders, setOrders] = useState<Order[]>(() => {
+  // Favorites are a separate, device-local list of product ids. They never feed into a lead.
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem('flaner_orders') || localStorage.getItem('lumiere_orders');
-      return saved ? JSON.parse(saved) : SEED_ORDERS;
+      return parseStoredFavorites(localStorage.getItem('flaner_favorites'));
     } catch {
-      return SEED_ORDERS;
+      return [];
     }
   });
 
@@ -167,15 +95,16 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const [selectedProductForDetail, setSelectedProductForDetail] = useState<Product | null>(null);
   const [isCartOpen, setIsCartOpen] = useState(false);
-  const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
-  const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [isLeadFormOpen, setIsLeadFormOpen] = useState(false);
+  const [isFavoritesOpen, setIsFavoritesOpen] = useState(false);
   const [isTelegramFrame, setIsTelegramFrame] = useState(false);
   const [isShareOpen, setIsShareOpen] = useState(false);
 
   const [telegramUser, setTelegramUser] = useState<TelegramWebAppUser | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
-  // Initialize Telegram
+  // Initialize Telegram. initDataUnsafe is only used to pre-fill the form: it is NOT an identity. The identity of a
+  // Telegram lead is decided by the backend from the signed initData.
   useEffect(() => {
     initTelegramApp();
     const user = getTelegramUser();
@@ -184,37 +113,82 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  // Sync to local storage
-  useEffect(() => {
-    try {
-      localStorage.setItem('flaner_products', JSON.stringify(products));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [products]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('flaner_cart', JSON.stringify(cart));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [cart]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('flaner_orders', JSON.stringify(orders));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [orders]);
-
   const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
     setToast({ message, type });
     setTimeout(() => {
       setToast(null);
     }, 3200);
   };
+
+  // The catalog always comes from the shared shop backend (GET /api/products). There is no bundled fallback list:
+  // stale prices or stock would end up in leads.
+  const loadCatalog = async () => {
+    try {
+      const response = await fetch(apiUrl('/api/products'), { credentials: 'omit' });
+      if (!response.ok) throw new Error('Не удалось загрузить каталог с сервера.');
+      const data: unknown = await response.json();
+      if (!Array.isArray(data)) throw new Error('Сервер вернул некорректный каталог товаров.');
+      setProducts(data as Product[]);
+      setCatalogStatus('ready');
+    } catch (error: unknown) {
+      console.error('Could not load product catalog:', error);
+      setCatalogStatus((current) => (current === 'ready' ? current : 'error'));
+      showToast(error instanceof Error ? error.message : 'Не удалось загрузить каталог.', 'error');
+    }
+  };
+
+  useEffect(() => {
+    void loadCatalog();
+  }, []);
+
+  const productById = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
+
+  // Live view of the cart: each stored line joined with the current catalog entry.
+  const cart: CartItem[] = useMemo(
+    () => cartLines.flatMap((line) => {
+      const product = productById.get(line.productId);
+      return product ? [{ product, quantity: line.quantity }] : [];
+    }),
+    [cartLines, productById]
+  );
+
+  const favorites: Product[] = useMemo(
+    () => favoriteIds.flatMap((id) => {
+      const product = productById.get(id);
+      return product ? [product] : [];
+    }),
+    [favoriteIds, productById]
+  );
+
+  // Once the real catalog is known, forget products that no longer exist (never before: an empty
+  // catalog while loading must not wipe the shopper's saved cart).
+  useEffect(() => {
+    if (catalogStatus !== 'ready') return;
+    const known = new Set(products.map((product) => product.id));
+    const keptLines = cartLines.filter((line) => known.has(line.productId));
+    if (keptLines.length !== cartLines.length) {
+      setCartLines(keptLines);
+      showToast('Некоторые товары больше недоступны и убраны из корзины', 'info');
+    }
+    const keptFavorites = favoriteIds.filter((id) => known.has(id));
+    if (keptFavorites.length !== favoriteIds.length) setFavoriteIds(keptFavorites);
+  }, [catalogStatus, products]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('flaner_cart', JSON.stringify(cartLines));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [cartLines]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('flaner_favorites', JSON.stringify(favoriteIds));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [favoriteIds]);
 
   const openProductDetail = (product: Product) => {
     triggerHaptic('light');
@@ -226,24 +200,28 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const addToCart = (product: Product, quantity = 1) => {
+    if (!product.inStock) {
+      showToast(`«${product.name}» сейчас нет в наличии`, 'error');
+      return;
+    }
+    const existing = cartLines.find((line) => line.productId === product.id);
+    if (!existing && cartLines.length >= MAX_ITEMS_PER_LEAD) {
+      showToast(`В заявке может быть не больше ${MAX_ITEMS_PER_LEAD} разных товаров`, 'error');
+      return;
+    }
+    const nextQuantity = Math.min(MAX_QUANTITY_PER_ITEM, (existing?.quantity ?? 0) + quantity);
+    if (existing && nextQuantity === existing.quantity) {
+      showToast(`Максимум ${MAX_QUANTITY_PER_ITEM} шт. одного товара`, 'info');
+      return;
+    }
     triggerHaptic('medium');
-    setCart((prev) => {
-      const existing = prev.find((item) => item.product.id === product.id);
-      if (existing) {
-        return prev.map((item) =>
-          item.product.id === product.id
-            ? { ...item, quantity: item.quantity + quantity }
-            : item
-        );
-      }
-      return [...prev, { product, quantity }];
-    });
+    setCartLines((prev) => upsertLine(prev, product.id, nextQuantity));
     showToast(`«${product.name}» добавлен в корзину`);
   };
 
   const removeFromCart = (productId: string) => {
     triggerHaptic('light');
-    setCart((prev) => prev.filter((item) => item.product.id !== productId));
+    setCartLines((prev) => prev.filter((line) => line.productId !== productId));
   };
 
   const updateQuantity = (productId: string, quantity: number) => {
@@ -252,125 +230,77 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       removeFromCart(productId);
       return;
     }
-    setCart((prev) =>
-      prev.map((item) =>
-        item.product.id === productId ? { ...item, quantity } : item
-      )
-    );
+    if (quantity > MAX_QUANTITY_PER_ITEM) {
+      showToast(`Максимум ${MAX_QUANTITY_PER_ITEM} шт. одного товара`, 'info');
+      return;
+    }
+    setCartLines((prev) => upsertLine(prev, productId, quantity));
   };
 
   const clearCart = () => {
-    setCart([]);
+    setCartLines([]);
   };
 
-  const createOrder = (order: Order) => {
-    triggerHaptic('success');
-    setOrders((prev) => [order, ...prev]);
-    clearCart();
-    showToast(`Заказ ${order.orderNumber} успешно оформлен!`, 'success');
+  const toggleFavorite = (productId: string) => {
+    triggerHaptic('light');
+    setFavoriteIds((prev) => (prev.includes(productId) ? prev.filter((id) => id !== productId) : [...prev, productId]));
+  };
 
-    // Notify Telegram bot
+  // One idempotency key per distinct submission (phone + cart). A retry after a timeout or a server error
+  // reuses it, so the server can recognise it and never creates a second lead.
+  const idempotencyRef = useRef<{ key: string; fingerprint: string } | null>(null);
+
+  const submitLead = async (values: LeadFormValues): Promise<LeadReceipt> => {
+    // Only the cart goes into a lead. Favorites are never read here.
+    const items = cartLines.map((line) => ({ productId: line.productId, quantity: line.quantity }));
+    if (!items.length) throw new LeadSubmitError('Корзина пуста', 'empty_cart');
+
+    const fingerprint = `${normalizeUzPhone(values.phone) ?? values.phone}|${cartSignature(cartLines)}`;
+    if (!idempotencyRef.current || idempotencyRef.current.fingerprint !== fingerprint) {
+      idempotencyRef.current = { key: createIdempotencyKey(), fingerprint };
+    }
+
+    // Read at submit time: the raw signed string is forwarded as is, and only the backend verifies it.
+    const initData = getTelegramInitData();
+
     try {
-      fetch('/api/telegram/send-order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          order,
-          customerChatId: order.customer.telegramId || telegramUser?.id
-        })
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.recipientsSent && data.recipientsSent.length > 0) {
-            showToast(`Уведомление о заказе ${order.orderNumber} отправлено в Telegram (@flaneruz_bot)`, 'success');
-          }
-        })
-        .catch((err) => {
-          console.warn('Telegram notification network error:', err);
-        });
-    } catch (e) {
-      console.warn('Telegram dispatch error:', e);
-    }
-  };
-
-  const updateOrderStatus = (orderId: string, status: OrderStatus) => {
-    triggerHaptic('medium');
-    const targetOrder = orders.find((ord) => ord.id === orderId);
-
-    setOrders((prev) =>
-      prev.map((ord) => (ord.id === orderId ? { ...ord, status } : ord))
-    );
-    showToast(`Статус заказа обновлен: ${status}`);
-
-    if (targetOrder) {
-      try {
-        fetch('/api/telegram/send-status-update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            orderNumber: targetOrder.orderNumber,
-            customerName: targetOrder.customer.fullName,
-            newStatus: status,
-            phone: targetOrder.customer.phone,
-            chatId: targetOrder.customer.telegramId
-          })
-        }).catch((e) => console.warn('Could not dispatch status to TG:', e));
-      } catch (e) {
-        console.warn('Status update TG error:', e);
+      const receipt = await postLead(
+        { ...values, items, idempotencyKey: idempotencyRef.current.key, ...(initData ? { initData } : {}) },
+        fetch,
+        API_BASE_URL
+      );
+      // Success (200 or 201): only now is the cart emptied.
+      idempotencyRef.current = null;
+      setCartLines([]);
+      triggerHaptic('success');
+      return receipt;
+    } catch (error) {
+      // Cart stays intact. If the catalog changed under the shopper, refresh it so the cart shows the truth.
+      if (error instanceof LeadSubmitError && (error.code === 'product_unavailable' || error.code === 'out_of_stock')) {
+        void loadCatalog();
       }
+      triggerHaptic('error');
+      throw error;
     }
-  };
-
-  const addProduct = (productData: Omit<Product, 'id'>) => {
-    const newProduct: Product = {
-      ...productData,
-      id: `prod-${Date.now()}`
-    };
-    setProducts((prev) => [newProduct, ...prev]);
-    showToast('Товар добавлен в каталог!');
-  };
-
-  const updateProduct = (id: string, updatedFields: Partial<Product>) => {
-    setProducts((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, ...updatedFields } : p))
-    );
-    showToast('Товар успешно обновлен');
-  };
-
-  const deleteProduct = (id: string) => {
-    triggerHaptic('warning');
-    setProducts((prev) => prev.filter((p) => p.id !== id));
-    showToast('Товар удален из каталога', 'info');
-  };
-
-  const toggleProductStock = (id: string) => {
-    setProducts((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, inStock: !p.inStock } : p))
-    );
-  };
-
-  const resetDemoData = () => {
-    setProducts(INITIAL_PRODUCTS);
-    setOrders(SEED_ORDERS);
-    setCart([]);
-    showToast('Данные сброшены к демонстрационному набору');
   };
 
   return (
     <ShopContext.Provider
       value={{
         products,
+        catalogStatus,
         cart,
+        favorites,
+        favoriteIds,
         selectedCategory,
         selectedBrand,
         searchQuery,
         sortBy,
         currency,
-        orders,
         selectedProductForDetail,
         isCartOpen,
-        isCheckoutOpen,
-        isAdminOpen,
+        isLeadFormOpen,
+        isFavoritesOpen,
         isTelegramFrame,
         isShareOpen,
         telegramUser,
@@ -381,24 +311,20 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setSortBy,
         setCurrency,
         setIsCartOpen,
-        setIsCheckoutOpen,
-        setIsAdminOpen,
+        setIsLeadFormOpen,
+        setIsFavoritesOpen,
         setIsTelegramFrame,
         setIsShareOpen,
+        reloadCatalog: loadCatalog,
         openProductDetail,
         closeProductDetail,
         addToCart,
         removeFromCart,
         updateQuantity,
         clearCart,
-        createOrder,
-        updateOrderStatus,
-        addProduct,
-        updateProduct,
-        deleteProduct,
-        toggleProductStock,
-        showToast,
-        resetDemoData
+        toggleFavorite,
+        submitLead,
+        showToast
       }}
     >
       {children}

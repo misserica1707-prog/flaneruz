@@ -1,8 +1,10 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import { defineConfig } from 'vite';
 
+// The Mini App is a static single-page app. It has no backend of its own: the catalog and the leads come from the
+// Flaner backend at VITE_API_BASE_URL (see .env.example).
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
@@ -12,11 +14,8 @@ export default defineConfig(() => {
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      port: 5174,
+      strictPort: true,
     },
   };
 });
